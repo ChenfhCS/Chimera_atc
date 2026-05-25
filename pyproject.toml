@@ -7,3 +7,18 @@ name = "chimera-artifact"
 version = "0.2.0"
 description = "Artifact scaffold for dynamic hybrid LLM evaluation and fine-tuning"
 requires-python = ">=3.10"
+
+# Without an explicit packages declaration, modern setuptools refuses to
+# auto-discover when multiple top-level directories exist (chimera/, configs/,
+# results/, scripts/, tests/, ...). Pin discovery to the python source only.
+[tool.setuptools.packages.find]
+include = ["chimera*"]
+exclude = [
+    "configs*",
+    "results*",
+    "scripts*",
+    "tests*",
+    "docs*",
+    "checkpoints*",
+    "logs*",
+]
