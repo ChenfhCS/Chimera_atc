@@ -173,6 +173,57 @@ def _is_nemotron_h(model) -> bool:
     return "nemotronh" in cls_name or "nemotron_h" in cls_name
 
 
+_CACHE_KWARG_CANDIDATES = ("past_key_values", "cache_params", "kv_cache", "cache")
+_CACHE_OUTPUT_FIELDS = ("past_key_values", "cache_params", "kv_cache", "cache")
+
+
+def _call_model_with_cache(
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    cache: Any,
+    cache_kwarg_name: Optional[str],
+) -> Tuple[Any, str]:
+    """Call ``model.forward`` while trying multiple cache kwarg names.
+
+    Returns (model_output, kwarg_name_that_worked). If ``cache_kwarg_name``
+    is provided, that name is tried first (and used exclusively if it
+    succeeds) — useful so we don't re-probe the signature on every decode
+    step.
+    """
+    base = dict(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=True,
+        return_dict=True,
+    )
+    order = []
+    if cache_kwarg_name:
+        order.append(cache_kwarg_name)
+    for name in _CACHE_KWARG_CANDIDATES:
+        if name not in order:
+            order.append(name)
+    last_err: Optional[Exception] = None
+    for name in order:
+        try:
+            return model(**base, **{name: cache}), name
+        except TypeError as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"None of {order} accepted by forward. Last err: {last_err!r}")
+
+
+def _extract_returned_cache(out, fallback: Any) -> Any:
+    """Pull the updated cache out of a model output object. Falls back to the
+    cache we passed in (it may have been updated in-place).
+    """
+    for name in _CACHE_OUTPUT_FIELDS:
+        v = getattr(out, name, None)
+        if v is not None:
+            return v
+    return fallback
+
+
 @torch.no_grad()
 def _manual_greedy_with_cache(
     model,
@@ -182,34 +233,33 @@ def _manual_greedy_with_cache(
     eos_token_id: Optional[int],
     cache: Any,
 ) -> torch.Tensor:
-    """Greedy decoding loop that threads ``past_key_values`` through every
-    forward call by hand. Bypasses HF ``model.generate()`` so that custom
-    hybrid caches (Nemotron-H ``HybridMambaAttentionDynamicCache``) survive
-    HF's prepare_inputs_for_generation, _supports_cache_class checks, etc.
+    """Greedy decoding loop that threads a hybrid cache through every forward
+    call by hand. Bypasses HF ``model.generate()`` so custom caches
+    (Nemotron-H ``HybridMambaAttentionDynamicCache``) survive
+    prepare_inputs_for_generation and ``_supports_cache_class`` checks.
+
+    Robust against alternative kwarg/output field names (Mamba-style models
+    often use ``cache_params`` rather than ``past_key_values``).
     """
-    # Prefill on the full prompt.
-    out = model(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        past_key_values=cache,
-        use_cache=True,
-        return_dict=True,
+    # Prefill: probe which kwarg name the model accepts and remember it.
+    out, kwarg_name = _call_model_with_cache(
+        model, input_ids, attention_mask, cache, cache_kwarg_name=None,
     )
-    cache = out.past_key_values if out.past_key_values is not None else cache
+    # One-time diagnostic so we can see the actual return shape.
+    fields = [f for f in _CACHE_OUTPUT_FIELDS if getattr(out, f, None) is not None]
+    print(f"[hybrid-cache] forward kwarg='{kwarg_name}', "
+          f"output exposes cache in fields={fields or 'NONE (in-place)'}")
+    cache = _extract_returned_cache(out, fallback=cache)
     next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     generated = [next_token]
     cur_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
     if eos_token_id is not None and (next_token == eos_token_id).all():
         return torch.cat([input_ids] + generated, dim=-1)
     for _ in range(max_new_tokens - 1):
-        out = model(
-            input_ids=next_token,
-            attention_mask=cur_mask,
-            past_key_values=cache,
-            use_cache=True,
-            return_dict=True,
+        out, _ = _call_model_with_cache(
+            model, next_token, cur_mask, cache, cache_kwarg_name=kwarg_name,
         )
-        cache = out.past_key_values if out.past_key_values is not None else cache
+        cache = _extract_returned_cache(out, fallback=cache)
         next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
         generated.append(next_token)
         cur_mask = torch.cat([cur_mask, torch.ones_like(next_token)], dim=-1)
