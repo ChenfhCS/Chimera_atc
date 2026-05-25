@@ -39,7 +39,41 @@ def load_hf_model_and_tokenizer(model_name_or_path: str, torch_dtype="bfloat16",
     tok = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
+    # Force use_cache=True for every model. Some hybrid checkpoints (Nemotron-H,
+    # Jamba, Mamba-2) ship with config.use_cache=False which causes .generate()
+    # to re-prefill the whole prompt at every decode step -> O(n^2), 50-100x
+    # slower than expected. The override is safe for pure-attention models too.
+    try:
+        model.config.use_cache = True
+    except Exception:
+        pass
+    if hasattr(model, "generation_config") and model.generation_config is not None:
+        try:
+            model.generation_config.use_cache = True
+        except Exception:
+            pass
     return model, tok
+
+
+def _hybrid_cache_kwargs(model) -> Dict:
+    """Per-model kwargs to make .generate() actually keep cache across decode
+    steps for hybrid architectures.
+
+    Pure-attention models (Llama family) already get a DynamicCache for free,
+    so we only emit extra kwargs when the architecture is Mamba/Jamba/
+    Nemotron-H-flavored. Returns an empty dict when nothing to do.
+    """
+    cls_name = (model.__class__.__name__ or "").lower()
+    is_nemotron_h = "nemotronh" in cls_name or "nemotron_h" in cls_name
+    is_jamba = "jamba" in cls_name
+    is_mamba = "mamba" in cls_name and not is_nemotron_h
+    if not (is_nemotron_h or is_jamba or is_mamba):
+        return {}
+    # transformers >= 4.45 accepts cache_implementation="hybrid" for models
+    # that register a hybrid cache. For pure Mamba it accepts "mamba".
+    if is_nemotron_h or is_jamba:
+        return {"cache_implementation": "hybrid"}
+    return {"cache_implementation": "mamba"}
 
 
 def resolve_max_new_tokens(dataset_name: str, override: Optional[int]) -> int:
@@ -57,6 +91,7 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
     total_new = 0
     total_time = 0.0
     device = next(model.parameters()).device
+    hybrid_kwargs = _hybrid_cache_kwargs(model) if not is_dynamic else {}
     for i in range(0, len(prompts), batch_size):
         batch = prompts[i:i+batch_size]
         enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=input_max_tokens).to(device)
@@ -65,7 +100,23 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
             if is_dynamic and hasattr(model, "generate_greedy"):
                 out = model.generate_greedy(enc.input_ids, attention_mask=enc.attention_mask, max_new_tokens=max_new_tokens, eos_token_id=tokenizer.eos_token_id)
             else:
-                out = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+                gen_kwargs = dict(
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.eos_token_id,
+                    use_cache=True,
+                )
+                gen_kwargs.update(hybrid_kwargs)
+                try:
+                    out = model.generate(**enc, **gen_kwargs)
+                except (TypeError, ValueError) as e:
+                    # Older transformers / some custom models don't accept
+                    # cache_implementation. Retry without it.
+                    if "cache_implementation" in str(e) and "cache_implementation" in gen_kwargs:
+                        gen_kwargs.pop("cache_implementation", None)
+                        out = model.generate(**enc, **gen_kwargs)
+                    else:
+                        raise
         total_time += t.elapsed
         total_new += int(out.shape[1] - input_len) * len(batch)
         gen = out[:, input_len:]
