@@ -291,17 +291,47 @@ def _manual_greedy_with_cache(
     return torch.cat([input_ids] + generated, dim=-1)
 
 
-def _augment_nemotron_cache(cache: Any, config) -> Any:
-    """Patch attributes that NemotronH's modeling code reads from the cache
-    but whose ``__init__`` only stored as local variables.
+class _DeviceAwareList(list):
+    """A list subclass that mirrors ``.device`` / ``.dtype`` of its first
+    element. Patches over NemotronH's ``update_conv_state`` bug:
 
-    NVIDIA's HybridMambaAttentionDynamicCache.__init__ does:
-        conv_kernel_size = config.conv_kernel   # local!
-        intermediate_size = config.expand * config.hidden_size  # local!
-        ssm_state_size = config.ssm_state_size  # local!
-    yet the Mamba mixer in forward reads ``cache_params.conv_kernel_size``
-    and similar — so we mirror them onto the instance after construction.
+        self.conv_states[layer_idx] = new.to(self.conv_states.device)
+                                                 ^^^^^^^^^^^^^^^^^^^^^
+                                                 conv_states is a list
+
+    The corrected call would have been ``self.conv_states[layer_idx].device``;
+    we keep the source intact and just expose the missing attribute.
     """
+
+    @property
+    def device(self):
+        for t in self:
+            if hasattr(t, "device"):
+                return t.device
+        return None
+
+    @property
+    def dtype(self):
+        for t in self:
+            if hasattr(t, "dtype"):
+                return t.dtype
+        return None
+
+
+def _augment_nemotron_cache(cache: Any, config) -> Any:
+    """Make a freshly built HybridMambaAttentionDynamicCache compatible with
+    NemotronH's modeling code. Two things need fixing:
+
+      1. Some config-derived constants (``conv_kernel_size``,
+         ``intermediate_size``, ``ssm_state_size``, ...) are stored only as
+         ``__init__`` locals and not as instance attributes, yet the Mamba
+         mixer reads them off the cache. We mirror them onto the instance.
+      2. ``update_conv_state`` and ``update_ssm_state`` call
+         ``self.conv_states.device`` directly on a Python ``list``. Wrap
+         conv_states / ssm_states in a list subclass that exposes ``.device``
+         delegating to the first stored tensor.
+    """
+    # 1) Mirror constants the modeling code reads from the cache.
     extras = {
         "conv_kernel_size": getattr(config, "conv_kernel", None),
         "intermediate_size": (
@@ -319,6 +349,15 @@ def _augment_nemotron_cache(cache: Any, config) -> Any:
         if not hasattr(cache, name):
             try:
                 setattr(cache, name, val)
+            except Exception:
+                pass
+
+    # 2) Wrap the state lists so ``cache.conv_states.device`` works.
+    for attr in ("conv_states", "ssm_states"):
+        existing = getattr(cache, attr, None)
+        if isinstance(existing, list) and not isinstance(existing, _DeviceAwareList):
+            try:
+                setattr(cache, attr, _DeviceAwareList(existing))
             except Exception:
                 pass
     return cache
