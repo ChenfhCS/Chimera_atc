@@ -23,6 +23,8 @@ DATASET_DEFAULT_MAX_NEW_TOKENS = {
     "GovReport": 512,
     "XSum": 64,
     "MultiNews": 256,
+    "arXiv": 256,
+    "PubMed": 256,
 }
 
 

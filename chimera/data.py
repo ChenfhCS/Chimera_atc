@@ -206,17 +206,67 @@ def load_eval_dataset(name: str, split: str = "validation", max_samples: Optiona
             ))
 
     elif name_l in {"multinews", "multi_news", "multi-news"}:
-        ds = _load_with_fallback(
-            ["alexfabbri/multi_news", "multi_news"], None, split,
-        )
+        # MultiNews has no first-class parquet mirror on HF Hub; only the
+        # script-based "alexfabbri/multi_news" exists, which datasets>=4.0
+        # refuses. We try a few community mirrors and surface a clear error
+        # so users can switch to arXiv / PubMed / XSum if they cannot
+        # downgrade datasets.
+        try:
+            ds = _load_with_fallback(
+                ["RUCAIBox/Multi-news", "ccdv/multi-news",
+                 "alexfabbri/multi_news", "multi_news"],
+                None, split,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"MultiNews could not be loaded ({e}). On datasets>=4.0 the "
+                "only HF copy is the script-based alexfabbri/multi_news, "
+                "which is blocked. Use one of:\n"
+                "  - pip install 'datasets<4.0' (re-enables script loaders)\n"
+                "  - --datasets arxiv          (long-doc, same ccdv mirror as GovReport)\n"
+                "  - --datasets pubmed         (long-doc, same ccdv mirror)\n"
+                "  - --datasets xsum           (short summary, EdinburghNLP/xsum parquet)\n"
+            ) from e
         for x in ds:
-            article = x.get("document") or x.get("article")
-            summary = x.get("summary")
+            article = x.get("document") or x.get("article") or x.get("text")
+            summary = x.get("summary") or x.get("abstract")
             if article is None or summary is None:
                 continue
             rows.append(EvalExample(
                 "MultiNews",
                 "Summarize the following news cluster:\n" + article + "\nSummary:",
+                summary,
+            ))
+
+    elif name_l in {"arxiv", "arxiv-summarization", "arxiv_summarization"}:
+        ds = _load_with_fallback(
+            ["ccdv/arxiv-summarization"], None, split,
+        )
+        for x in ds:
+            article = x.get("article") or x.get("document") or x.get("text")
+            summary = x.get("abstract") or x.get("summary")
+            if article is None or summary is None:
+                continue
+            rows.append(EvalExample(
+                "arXiv",
+                "Summarize the following scientific article:\n"
+                + article + "\nSummary:",
+                summary,
+            ))
+
+    elif name_l in {"pubmed", "pubmed-summarization", "pubmed_summarization"}:
+        ds = _load_with_fallback(
+            ["ccdv/pubmed-summarization"], None, split,
+        )
+        for x in ds:
+            article = x.get("article") or x.get("document") or x.get("text")
+            summary = x.get("abstract") or x.get("summary")
+            if article is None or summary is None:
+                continue
+            rows.append(EvalExample(
+                "PubMed",
+                "Summarize the following biomedical article:\n"
+                + article + "\nSummary:",
                 summary,
             ))
 
