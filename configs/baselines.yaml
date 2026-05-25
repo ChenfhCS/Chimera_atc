@@ -36,7 +36,7 @@ models:
   - name: Jamba-3.2B
     path: ai21labs/AI21-Jamba2-3B          # confirm this repo exists on HF
   - name: Nemotron-H-4.5B
-    path: nvidia/Nemotron-H-4B-Base-8K
+    path: nvidia/Nemotron-H-4B-Instruct-128K
     torch_dtype: bfloat16
 
   # ---------- Large tier (≥8B) ----------
