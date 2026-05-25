@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+import sys
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -62,18 +63,80 @@ def _hybrid_cache_kwargs(model) -> Dict:
     Pure-attention models (Llama family) already get a DynamicCache for free,
     so we only emit extra kwargs when the architecture is Mamba/Jamba/
     Nemotron-H-flavored. Returns an empty dict when nothing to do.
+
+    Note: Nemotron-H does NOT honor ``cache_implementation`` because its custom
+    cache class is not a subclass of HF ``Cache``. For that path we build the
+    cache manually via :func:`_build_legacy_hybrid_cache`. We still emit the
+    kwarg for Jamba which does honor the modern API.
     """
     cls_name = (model.__class__.__name__ or "").lower()
     is_nemotron_h = "nemotronh" in cls_name or "nemotron_h" in cls_name
     is_jamba = "jamba" in cls_name
     is_mamba = "mamba" in cls_name and not is_nemotron_h
-    if not (is_nemotron_h or is_jamba or is_mamba):
+    if is_nemotron_h:
         return {}
-    # transformers >= 4.45 accepts cache_implementation="hybrid" for models
-    # that register a hybrid cache. For pure Mamba it accepts "mamba".
-    if is_nemotron_h or is_jamba:
+    if is_jamba:
         return {"cache_implementation": "hybrid"}
-    return {"cache_implementation": "mamba"}
+    if is_mamba:
+        return {"cache_implementation": "mamba"}
+    return {}
+
+
+def _find_custom_cache_class(model) -> Optional[type]:
+    """Look up a hybrid cache class registered alongside the model's custom
+    modeling code (loaded via trust_remote_code). Returns ``None`` if not
+    found. Currently targets Nemotron-H's ``NemotronHHybridDynamicCache``.
+    """
+    mod_name = getattr(model.__class__, "__module__", None)
+    if not mod_name:
+        return None
+    mod = sys.modules.get(mod_name)
+    if mod is None:
+        return None
+    # Prefer the most specific name first.
+    for candidate in dir(mod):
+        if candidate.endswith("HybridDynamicCache"):
+            return getattr(mod, candidate)
+    for candidate in dir(mod):
+        if "HybridCache" in candidate:
+            return getattr(mod, candidate)
+    return None
+
+
+def _build_legacy_hybrid_cache(model, batch_size: int, max_len: int) -> Optional[Any]:
+    """Try a few constructor signatures to materialize a per-batch hybrid
+    cache. Returns ``None`` if no signature works — caller falls back to
+    cache-less generation.
+    """
+    cls_name = (model.__class__.__name__ or "").lower()
+    if "nemotronh" not in cls_name and "nemotron_h" not in cls_name:
+        return None
+    cache_cls = _find_custom_cache_class(model)
+    if cache_cls is None:
+        return None
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+    # Nemotron-H's cache has gone through a few signatures across releases.
+    attempts = [
+        lambda: cache_cls(config=model.config, batch_size=batch_size,
+                         max_cache_len=max_len, dtype=dtype, device=device),
+        lambda: cache_cls(model.config, batch_size, max_len, dtype, device),
+        lambda: cache_cls(config=model.config, batch_size=batch_size,
+                         dtype=dtype, device=device),
+        lambda: cache_cls(model.config, batch_size, dtype=dtype, device=device),
+        lambda: cache_cls(model.config, batch_size, device=device),
+        lambda: cache_cls(model.config, batch_size),
+        lambda: cache_cls(model.config),
+    ]
+    last_err: Optional[Exception] = None
+    for attempt in attempts:
+        try:
+            return attempt()
+        except Exception as e:
+            last_err = e
+            continue
+    print(f"[hybrid-cache] could not instantiate {cache_cls.__name__}: {last_err!r}")
+    return None
 
 
 def resolve_max_new_tokens(dataset_name: str, override: Optional[int]) -> int:
@@ -92,6 +155,7 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
     total_time = 0.0
     device = next(model.parameters()).device
     hybrid_kwargs = _hybrid_cache_kwargs(model) if not is_dynamic else {}
+    cache_announced = False
     for i in range(0, len(prompts), batch_size):
         batch = prompts[i:i+batch_size]
         enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=input_max_tokens).to(device)
@@ -107,13 +171,31 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
                     use_cache=True,
                 )
                 gen_kwargs.update(hybrid_kwargs)
+                # Per-batch fresh cache for Nemotron-H-style models whose
+                # custom modeling code refuses to construct one when
+                # past_key_values is None.
+                manual_cache = _build_legacy_hybrid_cache(
+                    model, batch_size=enc.input_ids.shape[0],
+                    max_len=int(input_len) + int(max_new_tokens),
+                )
+                if manual_cache is not None:
+                    gen_kwargs["past_key_values"] = manual_cache
+                    if not cache_announced:
+                        print(f"[hybrid-cache] {model.__class__.__name__}: "
+                              f"using {manual_cache.__class__.__name__}")
+                        cache_announced = True
                 try:
                     out = model.generate(**enc, **gen_kwargs)
                 except (TypeError, ValueError) as e:
-                    # Older transformers / some custom models don't accept
-                    # cache_implementation. Retry without it.
-                    if "cache_implementation" in str(e) and "cache_implementation" in gen_kwargs:
+                    msg = str(e)
+                    retried = False
+                    if "cache_implementation" in msg and "cache_implementation" in gen_kwargs:
                         gen_kwargs.pop("cache_implementation", None)
+                        retried = True
+                    if "past_key_values" in msg and "past_key_values" in gen_kwargs:
+                        gen_kwargs.pop("past_key_values", None)
+                        retried = True
+                    if retried:
                         out = model.generate(**enc, **gen_kwargs)
                     else:
                         raise
