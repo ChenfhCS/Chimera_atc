@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import tempfile
 import urllib.request
 from dataclasses import dataclass
@@ -127,7 +128,76 @@ def _piqa_iter(split: str) -> Iterable[dict]:
 # ---------------- Public loader ----------------
 
 
-def load_eval_dataset(name: str, split: str = "validation", max_samples: Optional[int] = None) -> List[EvalExample]:
+def _stratified_sample_by_length(rows: List["EvalExample"], n: int, rng: random.Random, buckets: int = 4) -> List["EvalExample"]:
+    """Pick ``n`` rows so the prompt-length distribution matches the full set.
+
+    We sort by prompt length, slice into ``buckets`` equal quantiles, then draw
+    n/buckets from each bucket. This keeps short/medium/long inputs proportional
+    even when ``n`` is small (e.g. 64), which is important for long-document
+    summarization datasets where length variance dominates ROUGE-L variance.
+    """
+    if n >= len(rows):
+        return list(rows)
+    indexed = sorted(enumerate(rows), key=lambda x: len(x[1].prompt))
+    bucket_size = max(1, len(indexed) // buckets)
+    per_bucket = max(1, n // buckets)
+    chosen: set[int] = set()
+    for b in range(buckets):
+        start = b * bucket_size
+        end = (b + 1) * bucket_size if b < buckets - 1 else len(indexed)
+        bucket = indexed[start:end]
+        for i, _ in rng.sample(bucket, min(per_bucket, len(bucket))):
+            chosen.add(i)
+    # Fill remainder uniformly so we always return exactly n rows.
+    pool = [i for i in range(len(rows)) if i not in chosen]
+    while len(chosen) < n and pool:
+        i = pool.pop(rng.randrange(len(pool)))
+        chosen.add(i)
+    out = [rows[i] for i in chosen]
+    rng.shuffle(out)
+    return out[:n]
+
+
+def _subsample(
+    rows: List["EvalExample"],
+    max_samples: Optional[int],
+    sample_seed: Optional[int],
+    stratify: str,
+) -> List["EvalExample"]:
+    """Apply ``--max_samples`` policy: head, random, or length-stratified."""
+    if max_samples is None or len(rows) <= max_samples:
+        return rows
+    if sample_seed is None:
+        return rows[:max_samples]
+    rng = random.Random(sample_seed)
+    if stratify == "length":
+        return _stratified_sample_by_length(rows, max_samples, rng)
+    if stratify in {"none", "random"}:
+        return rng.sample(rows, max_samples)
+    raise ValueError(f"Unknown stratify mode: {stratify}")
+
+
+def load_eval_dataset(
+    name: str,
+    split: str = "validation",
+    max_samples: Optional[int] = None,
+    sample_seed: Optional[int] = None,
+    stratify: str = "length",
+) -> List[EvalExample]:
+    """Load one of the supported eval datasets.
+
+    Args:
+        name: e.g. ``"arc-e"``, ``"piqa"``, ``"arxiv"``.
+        split: HF dataset split (defaults to ``validation``).
+        max_samples: Cap on returned rows. ``None`` = full split.
+        sample_seed: If set, draw ``max_samples`` rows pseudo-randomly with
+            this seed (representative). If ``None``, take the first
+            ``max_samples`` rows (deterministic head, but biased).
+        stratify: ``"length"`` (default) buckets by prompt length and samples
+            evenly across buckets — recommended for summarization datasets
+            with high length variance. ``"none"`` / ``"random"`` plain
+            uniform random sampling. Ignored when ``sample_seed is None``.
+    """
     name_l = name.lower()
     rows: List[EvalExample] = []
 
@@ -288,8 +358,7 @@ def load_eval_dataset(name: str, split: str = "validation", max_samples: Optiona
     else:
         raise ValueError(f"Unknown dataset: {name}")
 
-    if max_samples is not None:
-        rows = rows[:max_samples]
+    rows = _subsample(rows, max_samples, sample_seed, stratify)
     return rows
 
 

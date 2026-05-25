@@ -49,14 +49,15 @@ def resolve_max_new_tokens(dataset_name: str, override: Optional[int]) -> int:
 
 
 @torch.no_grad()
-def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batch_size=1, is_dynamic=False):
+def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batch_size=1, is_dynamic=False,
+                   input_max_tokens: int = 4096):
     preds = []
     total_new = 0
     total_time = 0.0
     device = next(model.parameters()).device
     for i in range(0, len(prompts), batch_size):
         batch = prompts[i:i+batch_size]
-        enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=4096).to(device)
+        enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=input_max_tokens).to(device)
         input_len = enc.input_ids.shape[1]
         with Timer() as t:
             if is_dynamic and hasattr(model, "generate_greedy"):
@@ -71,10 +72,12 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
     return preds, tps
 
 
-def evaluate_examples(model, tokenizer, examples: List[EvalExample], max_new_tokens=None, batch_size=1, metric="auto", is_dynamic=False) -> Dict:
+def evaluate_examples(model, tokenizer, examples: List[EvalExample], max_new_tokens=None, batch_size=1,
+                      metric="auto", is_dynamic=False, input_max_tokens: int = 4096) -> Dict:
     ds_name = examples[0].dataset if examples else "unknown"
     effective_new_tokens = resolve_max_new_tokens(ds_name, max_new_tokens)
-    preds, tps = generate_texts(model, tokenizer, [x.prompt for x in examples], effective_new_tokens, batch_size, is_dynamic)
+    preds, tps = generate_texts(model, tokenizer, [x.prompt for x in examples], effective_new_tokens,
+                                batch_size, is_dynamic, input_max_tokens=input_max_tokens)
     labels = [x.target for x in examples]
     ds = ds_name
     if metric == "auto":
@@ -101,4 +104,5 @@ def evaluate_examples(model, tokenizer, examples: List[EvalExample], max_new_tok
         "tpt": tps,
         "num_samples": len(examples),
         "max_new_tokens": effective_new_tokens,
+        "input_max_tokens": input_max_tokens,
     }

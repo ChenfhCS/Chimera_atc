@@ -47,6 +47,17 @@ def main():
                     help='Optional dataset whitelist; overrides the config datasets list.')
     ap.add_argument('--free_after', action='store_true',
                     help='Drop the model and empty the CUDA cache between models. Recommended at 8B+.')
+    ap.add_argument('--sample_seed', type=int, default=42,
+                    help='Seed for representative sampling of --max_samples rows. '
+                         'Set to 0 to disable sampling (take the first N rows = old behavior).')
+    ap.add_argument('--stratify', default='length', choices=['length', 'random', 'none'],
+                    help='Sampling strategy when sample_seed is set. "length" (default) '
+                         'buckets by prompt length and draws evenly across buckets so the '
+                         'subset matches the full distribution. Use "random" for plain uniform.')
+    ap.add_argument('--input_max_tokens', type=int, default=4096,
+                    help='Tokenizer truncation length for input prompts. Lower this to '
+                         'speed up long-document evals (arXiv/GovReport prefill is dominated '
+                         'by input length). 2048 typically halves wall-time for arXiv.')
     args = ap.parse_args()
     set_seed(args.seed)
 
@@ -77,9 +88,13 @@ def main():
             path, torch_dtype=torch_dtype, device_map=device_map, trust_remote_code=trust,
         )
 
+        sample_seed = args.sample_seed if args.sample_seed != 0 else None
         for ds_name in datasets:
             try:
-                examples = load_eval_dataset(ds_name, split=split, max_samples=args.max_samples)
+                examples = load_eval_dataset(
+                    ds_name, split=split, max_samples=args.max_samples,
+                    sample_seed=sample_seed, stratify=args.stratify,
+                )
             except Exception as e:
                 print(f'  [{ds_name}] dataset load failed: {e}')
                 append_jsonl(args.output, {'model': name, 'dataset': ds_name, 'error': repr(e)})
@@ -89,6 +104,7 @@ def main():
                     model, tok, examples,
                     max_new_tokens=args.max_new_tokens,
                     batch_size=args.batch_size,
+                    input_max_tokens=args.input_max_tokens,
                 )
             except Exception as e:
                 print(f'  [{ds_name}] eval failed: {e}')

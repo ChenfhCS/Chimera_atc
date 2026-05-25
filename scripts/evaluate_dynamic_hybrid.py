@@ -35,6 +35,10 @@ def main():
     ap.add_argument('--batch_size', type=int, default=1)
     ap.add_argument('--max_new_tokens', type=int, default=None,
                     help='Override generation budget; defaults to a per-dataset value when omitted.')
+    ap.add_argument('--sample_seed', type=int, default=42,
+                    help='Seed for representative sampling. Set to 0 to take head-N rows.')
+    ap.add_argument('--stratify', default='length', choices=['length', 'random', 'none'])
+    ap.add_argument('--input_max_tokens', type=int, default=4096)
     ap.add_argument('--seed', type=int, default=42)
     args = ap.parse_args()
     set_seed(args.seed)
@@ -42,10 +46,20 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(device)
     ensure_dir(args.output.rsplit('/',1)[0] if '/' in args.output else '.')
+    sample_seed = args.sample_seed if args.sample_seed != 0 else None
     for ds_name in args.datasets:
         split = 'validation'
-        examples = load_eval_dataset(ds_name, split=split, max_samples=args.max_samples)
-        res = evaluate_examples(model, tok, examples, max_new_tokens=args.max_new_tokens, batch_size=args.batch_size, is_dynamic=True)
+        examples = load_eval_dataset(
+            ds_name, split=split, max_samples=args.max_samples,
+            sample_seed=sample_seed, stratify=args.stratify,
+        )
+        res = evaluate_examples(
+            model, tok, examples,
+            max_new_tokens=args.max_new_tokens,
+            batch_size=args.batch_size,
+            is_dynamic=True,
+            input_max_tokens=args.input_max_tokens,
+        )
         row = {'model': 'Dynamic Hybrid', **res}
         print(row)
         append_jsonl(args.output, row)
