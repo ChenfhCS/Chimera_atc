@@ -1,0 +1,13 @@
+# IMPORTANT: choose Attention and SSM checkpoints with the same hidden size.
+# These paths are examples and may need to be replaced by your prepared checkpoints.
+attn_model_name_or_path: meta-llama/Llama-3.2-3B
+ssm_model_name_or_path: state-spaces/mamba2-2.7b
+num_layers: 28
+gate_hidden_size: 1024
+gate_temperature: 1.0
+routing_mode: soft
+torch_dtype: bfloat16
+trust_remote_code: true
+attn_layer_offset: 0
+ssm_layer_offset: 0
+tie_lm_head: true

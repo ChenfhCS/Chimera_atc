@@ -1,0 +1,14 @@
+# Local tiny configuration. Build the two checkpoints first with:
+#   python scripts/make_tiny_local_branches.py --root checkpoints/tiny
+# Both branches share hidden_size=64 so the dHybrid hidden-size guard passes.
+attn_model_name_or_path: checkpoints/tiny/attn
+ssm_model_name_or_path: checkpoints/tiny/ssm
+num_layers: 2
+gate_hidden_size: 64
+gate_temperature: 1.0
+routing_mode: soft
+torch_dtype: float32
+trust_remote_code: false
+attn_layer_offset: 0
+ssm_layer_offset: 0
+tie_lm_head: true

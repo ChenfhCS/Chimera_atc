@@ -1,0 +1,9 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chimera-artifact"
+version = "0.2.0"
+description = "Artifact scaffold for dynamic hybrid LLM evaluation and fine-tuning"
+requires-python = ">=3.10"

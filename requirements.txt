@@ -1,0 +1,11 @@
+torch>=2.1
+transformers>=4.45
+datasets>=2.18,<4.0
+accelerate>=0.28
+pyyaml>=6.0
+pandas>=2.0
+numpy>=1.24
+sentencepiece>=0.1.99
+protobuf>=4.25
+rouge-score>=0.1.2
+pytest>=7.0
