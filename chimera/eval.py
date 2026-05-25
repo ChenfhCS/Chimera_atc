@@ -25,6 +25,8 @@ DATASET_DEFAULT_MAX_NEW_TOKENS = {
     "MultiNews": 256,
     "arXiv": 256,
     "PubMed": 256,
+    "SAMSum": 64,
+    "BillSum": 256,
 }
 
 

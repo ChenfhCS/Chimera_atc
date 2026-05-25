@@ -340,6 +340,41 @@ def load_eval_dataset(
                 summary,
             ))
 
+    elif name_l == "samsum":
+        # Dialog summarization. ~16k train / 818 validation / 819 test.
+        # Inputs are short (avg ~100 tokens), targets are 1-2 sentences.
+        ds = _load_with_fallback(
+            ["knkarthick/samsum", "Samsung/samsum", "samsum"], None, split,
+        )
+        for x in ds:
+            dialogue = x.get("dialogue") or x.get("document") or x.get("text")
+            summary = x.get("summary")
+            if dialogue is None or summary is None:
+                continue
+            rows.append(EvalExample(
+                "SAMSum",
+                "Summarize the following dialogue:\n" + dialogue + "\nSummary:",
+                summary,
+            ))
+
+    elif name_l in {"billsum", "bill_sum"}:
+        # US Congressional bills. ~18.9k train / 3.2k California test.
+        # Inputs ~1.5k tokens, targets ~200 tokens. Smaller than arXiv,
+        # legal-document genre.
+        ds = _load_with_fallback(
+            ["FiscalNote/billsum", "billsum"], None, split,
+        )
+        for x in ds:
+            article = x.get("text") or x.get("document") or x.get("article")
+            summary = x.get("summary") or x.get("abstract")
+            if article is None or summary is None:
+                continue
+            rows.append(EvalExample(
+                "BillSum",
+                "Summarize the following bill:\n" + article + "\nSummary:",
+                summary,
+            ))
+
     elif name_l == "govreport":
         ds = _load_with_fallback(
             ["ccdv/govreport-summarization", "launch/gov_report"], None, split,
