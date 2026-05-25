@@ -10,6 +10,7 @@ numbers are directly comparable.
 import argparse
 import os
 import sys
+import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -113,6 +114,7 @@ def main():
                 )
             except Exception as e:
                 print(f'  [{ds_name}] eval failed: {e}')
+                traceback.print_exc()
                 append_jsonl(args.output, {'model': name, 'dataset': ds_name, 'error': repr(e)})
                 continue
             row = {'model': name, **res}
