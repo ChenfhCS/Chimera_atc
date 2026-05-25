@@ -291,6 +291,39 @@ def _manual_greedy_with_cache(
     return torch.cat([input_ids] + generated, dim=-1)
 
 
+def _augment_nemotron_cache(cache: Any, config) -> Any:
+    """Patch attributes that NemotronH's modeling code reads from the cache
+    but whose ``__init__`` only stored as local variables.
+
+    NVIDIA's HybridMambaAttentionDynamicCache.__init__ does:
+        conv_kernel_size = config.conv_kernel   # local!
+        intermediate_size = config.expand * config.hidden_size  # local!
+        ssm_state_size = config.ssm_state_size  # local!
+    yet the Mamba mixer in forward reads ``cache_params.conv_kernel_size``
+    and similar — so we mirror them onto the instance after construction.
+    """
+    extras = {
+        "conv_kernel_size": getattr(config, "conv_kernel", None),
+        "intermediate_size": (
+            getattr(config, "expand", 1) * getattr(config, "hidden_size", 0)
+        ),
+        "ssm_state_size": getattr(config, "ssm_state_size", None),
+        "n_groups": getattr(config, "n_groups", None),
+        "head_dim": getattr(config, "head_dim", None),
+        "num_heads": getattr(config, "num_attention_heads", None),
+        "batch_size": getattr(cache, "batch_size", None),
+    }
+    for name, val in extras.items():
+        if val is None:
+            continue
+        if not hasattr(cache, name):
+            try:
+                setattr(cache, name, val)
+            except Exception:
+                pass
+    return cache
+
+
 def _build_legacy_hybrid_cache(model, batch_size: int, max_len: int) -> Optional[Any]:
     """Try a few constructor signatures to materialize a per-batch hybrid
     cache. Returns ``None`` if no signature works — caller falls back to
@@ -318,7 +351,8 @@ def _build_legacy_hybrid_cache(model, batch_size: int, max_len: int) -> Optional
     last_err: Optional[Exception] = None
     for attempt in attempts:
         try:
-            return attempt()
+            cache = attempt()
+            return _augment_nemotron_cache(cache, model.config)
         except Exception as e:
             last_err = e
             continue
