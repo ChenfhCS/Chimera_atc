@@ -173,8 +173,29 @@ def _is_nemotron_h(model) -> bool:
     return "nemotronh" in cls_name or "nemotron_h" in cls_name
 
 
-_CACHE_KWARG_CANDIDATES = ("past_key_values", "cache_params", "kv_cache", "cache")
-_CACHE_OUTPUT_FIELDS = ("past_key_values", "cache_params", "kv_cache", "cache")
+# Cache kwarg priority is Mamba-style first because the only models that hit
+# our manual decode loop are hybrid Mamba/Attention checkpoints.
+_CACHE_KWARG_CANDIDATES = ("cache_params", "past_key_values", "kv_cache", "cache")
+_CACHE_OUTPUT_FIELDS = ("cache_params", "past_key_values", "kv_cache", "cache")
+
+
+def _detect_cache_kwarg_name(model) -> Optional[str]:
+    """Inspect ``model.forward`` to find the actual cache kwarg name.
+
+    Trial-and-error fails for models whose signature ends in ``**kwargs`` (like
+    Nemotron-H): wrong kwarg names get silently swallowed, the model runs with
+    its real cache argument still defaulting to ``None``, and we see the
+    "no cache will be returned" warning even though no TypeError was raised.
+    """
+    import inspect
+    try:
+        params = inspect.signature(model.forward).parameters
+    except (ValueError, TypeError):
+        return None
+    for name in _CACHE_KWARG_CANDIDATES:
+        if name in params:
+            return name
+    return None
 
 
 def _call_model_with_cache(
@@ -182,35 +203,27 @@ def _call_model_with_cache(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     cache: Any,
-    cache_kwarg_name: Optional[str],
-) -> Tuple[Any, str]:
-    """Call ``model.forward`` while trying multiple cache kwarg names.
-
-    Returns (model_output, kwarg_name_that_worked). If ``cache_kwarg_name``
-    is provided, that name is tried first (and used exclusively if it
-    succeeds) — useful so we don't re-probe the signature on every decode
-    step.
-    """
-    base = dict(
+    cache_kwarg_name: str,
+    cache_position: Optional[torch.Tensor] = None,
+) -> Any:
+    """Call ``model.forward`` with an explicit cache kwarg + cache_position."""
+    kwargs = dict(
         input_ids=input_ids,
         attention_mask=attention_mask,
         use_cache=True,
         return_dict=True,
     )
-    order = []
-    if cache_kwarg_name:
-        order.append(cache_kwarg_name)
-    for name in _CACHE_KWARG_CANDIDATES:
-        if name not in order:
-            order.append(name)
-    last_err: Optional[Exception] = None
-    for name in order:
-        try:
-            return model(**base, **{name: cache}), name
-        except TypeError as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"None of {order} accepted by forward. Last err: {last_err!r}")
+    kwargs[cache_kwarg_name] = cache
+    if cache_position is not None:
+        kwargs["cache_position"] = cache_position
+    try:
+        return model(**kwargs)
+    except TypeError as e:
+        # Some forwards don't accept cache_position; retry without it.
+        if "cache_position" in str(e):
+            kwargs.pop("cache_position", None)
+            return model(**kwargs)
+        raise
 
 
 def _extract_returned_cache(out, fallback: Any) -> Any:
@@ -238,26 +251,36 @@ def _manual_greedy_with_cache(
     (Nemotron-H ``HybridMambaAttentionDynamicCache``) survive
     prepare_inputs_for_generation and ``_supports_cache_class`` checks.
 
-    Robust against alternative kwarg/output field names (Mamba-style models
-    often use ``cache_params`` rather than ``past_key_values``).
+    Looks up the actual cache kwarg name via ``inspect`` (Mamba-style models
+    name it ``cache_params``, attention models name it ``past_key_values``),
+    and threads ``cache_position`` so the Mamba branch knows we are decoding
+    rather than re-prefilling.
     """
-    # Prefill: probe which kwarg name the model accepts and remember it.
-    out, kwarg_name = _call_model_with_cache(
-        model, input_ids, attention_mask, cache, cache_kwarg_name=None,
+    device = input_ids.device
+    kwarg_name = _detect_cache_kwarg_name(model) or "past_key_values"
+    print(f"[hybrid-cache] forward kwarg='{kwarg_name}'")
+
+    L = int(input_ids.shape[1])
+    # Prefill on the full prompt.
+    cache_position = torch.arange(L, device=device, dtype=torch.long)
+    out = _call_model_with_cache(
+        model, input_ids, attention_mask, cache,
+        cache_kwarg_name=kwarg_name, cache_position=cache_position,
     )
-    # One-time diagnostic so we can see the actual return shape.
     fields = [f for f in _CACHE_OUTPUT_FIELDS if getattr(out, f, None) is not None]
-    print(f"[hybrid-cache] forward kwarg='{kwarg_name}', "
-          f"output exposes cache in fields={fields or 'NONE (in-place)'}")
+    print(f"[hybrid-cache] output cache fields={fields or 'NONE (in-place)'}")
     cache = _extract_returned_cache(out, fallback=cache)
     next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     generated = [next_token]
     cur_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
     if eos_token_id is not None and (next_token == eos_token_id).all():
         return torch.cat([input_ids] + generated, dim=-1)
-    for _ in range(max_new_tokens - 1):
-        out, _ = _call_model_with_cache(
-            model, next_token, cur_mask, cache, cache_kwarg_name=kwarg_name,
+
+    for step in range(1, max_new_tokens):
+        cache_position = torch.tensor([L + step - 1], device=device, dtype=torch.long)
+        out = _call_model_with_cache(
+            model, next_token, cur_mask, cache,
+            cache_kwarg_name=kwarg_name, cache_position=cache_position,
         )
         cache = _extract_returned_cache(out, fallback=cache)
         next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
