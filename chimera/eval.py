@@ -168,13 +168,62 @@ def _find_custom_cache_class(model) -> Optional[type]:
     return None
 
 
+def _is_nemotron_h(model) -> bool:
+    cls_name = (model.__class__.__name__ or "").lower()
+    return "nemotronh" in cls_name or "nemotron_h" in cls_name
+
+
+@torch.no_grad()
+def _manual_greedy_with_cache(
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    max_new_tokens: int,
+    eos_token_id: Optional[int],
+    cache: Any,
+) -> torch.Tensor:
+    """Greedy decoding loop that threads ``past_key_values`` through every
+    forward call by hand. Bypasses HF ``model.generate()`` so that custom
+    hybrid caches (Nemotron-H ``HybridMambaAttentionDynamicCache``) survive
+    HF's prepare_inputs_for_generation, _supports_cache_class checks, etc.
+    """
+    # Prefill on the full prompt.
+    out = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        past_key_values=cache,
+        use_cache=True,
+        return_dict=True,
+    )
+    cache = out.past_key_values if out.past_key_values is not None else cache
+    next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+    generated = [next_token]
+    cur_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
+    if eos_token_id is not None and (next_token == eos_token_id).all():
+        return torch.cat([input_ids] + generated, dim=-1)
+    for _ in range(max_new_tokens - 1):
+        out = model(
+            input_ids=next_token,
+            attention_mask=cur_mask,
+            past_key_values=cache,
+            use_cache=True,
+            return_dict=True,
+        )
+        cache = out.past_key_values if out.past_key_values is not None else cache
+        next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        generated.append(next_token)
+        cur_mask = torch.cat([cur_mask, torch.ones_like(next_token)], dim=-1)
+        if eos_token_id is not None and (next_token == eos_token_id).all():
+            break
+    return torch.cat([input_ids] + generated, dim=-1)
+
+
 def _build_legacy_hybrid_cache(model, batch_size: int, max_len: int) -> Optional[Any]:
     """Try a few constructor signatures to materialize a per-batch hybrid
     cache. Returns ``None`` if no signature works — caller falls back to
     cache-less generation.
     """
-    cls_name = (model.__class__.__name__ or "").lower()
-    if "nemotronh" not in cls_name and "nemotron_h" not in cls_name:
+    if not _is_nemotron_h(model):
         return None
     cache_cls = _find_custom_cache_class(model)
     if cache_cls is None:
@@ -221,6 +270,7 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
     device = next(model.parameters()).device
     hybrid_kwargs = _hybrid_cache_kwargs(model) if not is_dynamic else {}
     cache_announced = False
+    use_manual_loop = (not is_dynamic) and _is_nemotron_h(model)
     for i in range(0, len(prompts), batch_size):
         batch = prompts[i:i+batch_size]
         enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=input_max_tokens).to(device)
@@ -228,6 +278,35 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
         with Timer() as t:
             if is_dynamic and hasattr(model, "generate_greedy"):
                 out = model.generate_greedy(enc.input_ids, attention_mask=enc.attention_mask, max_new_tokens=max_new_tokens, eos_token_id=tokenizer.eos_token_id)
+            elif use_manual_loop:
+                # Nemotron-H's _supports_cache_class is False, so HF generate()
+                # silently drops the hybrid cache we pass in and re-prefills
+                # the whole prompt at every decode step (~100x slowdown).
+                # Run a hand-written greedy loop that keeps the cache alive.
+                manual_cache = _build_legacy_hybrid_cache(
+                    model, batch_size=enc.input_ids.shape[0],
+                    max_len=int(input_len) + int(max_new_tokens),
+                )
+                if manual_cache is None:
+                    # Fall back to vanilla generate if we cannot construct the
+                    # cache class for this revision.
+                    out = model.generate(
+                        **enc, max_new_tokens=max_new_tokens, do_sample=False,
+                        pad_token_id=tokenizer.eos_token_id, use_cache=True,
+                    )
+                else:
+                    if not cache_announced:
+                        print(f"[hybrid-cache] {model.__class__.__name__}: "
+                              f"manual loop with {manual_cache.__class__.__name__}")
+                        cache_announced = True
+                    out = _manual_greedy_with_cache(
+                        model,
+                        input_ids=enc.input_ids,
+                        attention_mask=enc.attention_mask,
+                        max_new_tokens=max_new_tokens,
+                        eos_token_id=tokenizer.eos_token_id,
+                        cache=manual_cache,
+                    )
             else:
                 gen_kwargs = dict(
                     max_new_tokens=max_new_tokens,
@@ -236,31 +315,12 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
                     use_cache=True,
                 )
                 gen_kwargs.update(hybrid_kwargs)
-                # Per-batch fresh cache for Nemotron-H-style models whose
-                # custom modeling code refuses to construct one when
-                # past_key_values is None.
-                manual_cache = _build_legacy_hybrid_cache(
-                    model, batch_size=enc.input_ids.shape[0],
-                    max_len=int(input_len) + int(max_new_tokens),
-                )
-                if manual_cache is not None:
-                    gen_kwargs["past_key_values"] = manual_cache
-                    if not cache_announced:
-                        print(f"[hybrid-cache] {model.__class__.__name__}: "
-                              f"using {manual_cache.__class__.__name__}")
-                        cache_announced = True
                 try:
                     out = model.generate(**enc, **gen_kwargs)
                 except (TypeError, ValueError) as e:
                     msg = str(e)
-                    retried = False
                     if "cache_implementation" in msg and "cache_implementation" in gen_kwargs:
                         gen_kwargs.pop("cache_implementation", None)
-                        retried = True
-                    if "past_key_values" in msg and "past_key_values" in gen_kwargs:
-                        gen_kwargs.pop("past_key_values", None)
-                        retried = True
-                    if retried:
                         out = model.generate(**enc, **gen_kwargs)
                     else:
                         raise
