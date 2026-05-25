@@ -39,6 +39,8 @@ def main():
                     help='Seed for representative sampling. Set to 0 to take head-N rows.')
     ap.add_argument('--stratify', default='length', choices=['length', 'random', 'none'])
     ap.add_argument('--input_max_tokens', type=int, default=4096)
+    ap.add_argument('--split', default='validation',
+                    help='HF split or slice e.g. "validation[:500]" to limit download volume.')
     ap.add_argument('--seed', type=int, default=42)
     args = ap.parse_args()
     set_seed(args.seed)
@@ -48,9 +50,8 @@ def main():
     ensure_dir(args.output.rsplit('/',1)[0] if '/' in args.output else '.')
     sample_seed = args.sample_seed if args.sample_seed != 0 else None
     for ds_name in args.datasets:
-        split = 'validation'
         examples = load_eval_dataset(
-            ds_name, split=split, max_samples=args.max_samples,
+            ds_name, split=args.split, max_samples=args.max_samples,
             sample_seed=sample_seed, stratify=args.stratify,
         )
         res = evaluate_examples(

@@ -58,6 +58,11 @@ def main():
                     help='Tokenizer truncation length for input prompts. Lower this to '
                          'speed up long-document evals (arXiv/GovReport prefill is dominated '
                          'by input length). 2048 typically halves wall-time for arXiv.')
+    ap.add_argument('--split', default=None,
+                    help='Override the per-config split. Accepts HF split arithmetic, e.g. '
+                         '"validation[:500]" to only download the first 500 rows. Useful '
+                         'when the dataset parquet itself is large (PubMed, arXiv) and you '
+                         'only need a small representative subset.')
     args = ap.parse_args()
     set_seed(args.seed)
 
@@ -80,7 +85,7 @@ def main():
         torch_dtype = _resolve(model_cfg, cfg, 'torch_dtype', 'bfloat16')
         device_map = _resolve(model_cfg, cfg, 'device_map', 'auto')
         trust = _resolve(model_cfg, cfg, 'trust_remote_code', True)
-        split = _resolve(model_cfg, cfg, 'split', 'validation')
+        split = args.split or _resolve(model_cfg, cfg, 'split', 'validation')
 
         print(f'\n=== Loading {name} from {path} ===')
         print(f'    dtype={torch_dtype} device_map={device_map} trust_remote_code={trust}')
