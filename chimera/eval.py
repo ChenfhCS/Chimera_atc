@@ -82,24 +82,89 @@ def _hybrid_cache_kwargs(model) -> Dict:
     return {}
 
 
-def _find_custom_cache_class(model) -> Optional[type]:
-    """Look up a hybrid cache class registered alongside the model's custom
-    modeling code (loaded via trust_remote_code). Returns ``None`` if not
-    found. Currently targets Nemotron-H's ``NemotronHHybridDynamicCache``.
+def _ensure_dynamic_siblings_loaded(model) -> None:
+    """Force-import every .py file that lives next to the model's modeling
+    code. Cache classes are often defined in a sibling ``cache_utils.py`` or
+    similar that the modeling file imports lazily, so ``dir(modeling_mod)``
+    alone misses them until we explicitly load the package.
     """
-    mod_name = getattr(model.__class__, "__module__", None)
-    if not mod_name:
-        return None
-    mod = sys.modules.get(mod_name)
-    if mod is None:
-        return None
-    # Prefer the most specific name first.
-    for candidate in dir(mod):
-        if candidate.endswith("HybridDynamicCache"):
-            return getattr(mod, candidate)
-    for candidate in dir(mod):
-        if "HybridCache" in candidate:
-            return getattr(mod, candidate)
+    import importlib
+    import os
+    mod_name = getattr(model.__class__, "__module__", "") or ""
+    if not mod_name.startswith("transformers_modules."):
+        return
+    parts = mod_name.split(".")
+    if len(parts) < 2:
+        return
+    parent_pkg = ".".join(parts[:-1])
+    parent_mod = sys.modules.get(parent_pkg)
+    if parent_mod is None:
+        try:
+            parent_mod = importlib.import_module(parent_pkg)
+        except Exception:
+            return
+    parent_path = getattr(parent_mod, "__path__", None)
+    if not parent_path:
+        return
+    parent_dir = parent_path[0]
+    if not os.path.isdir(parent_dir):
+        return
+    for fn in os.listdir(parent_dir):
+        if fn.endswith(".py") and not fn.startswith("_"):
+            sub_name = parent_pkg + "." + fn[:-3]
+            if sub_name not in sys.modules:
+                try:
+                    importlib.import_module(sub_name)
+                except Exception:
+                    continue
+
+
+def _find_custom_cache_class(model) -> Optional[type]:
+    """Search every loaded module that belongs to the model's
+    dynamic_modules package for a hybrid cache class. Tries the most
+    specific name suffix first and falls back to fuzzy match.
+    """
+    mod_name = getattr(model.__class__, "__module__", "") or ""
+
+    _ensure_dynamic_siblings_loaded(model)
+
+    candidate_mods = []
+    if mod_name:
+        m = sys.modules.get(mod_name)
+        if m is not None:
+            candidate_mods.append(m)
+    if mod_name.startswith("transformers_modules."):
+        prefix = ".".join(mod_name.split(".")[:-1]) + "."
+        for name, m in list(sys.modules.items()):
+            if name.startswith(prefix) and m is not None and m not in candidate_mods:
+                candidate_mods.append(m)
+
+    seen_caches: List[Tuple[str, str]] = []
+    # Priority 1: explicit Nemotron-H / hybrid-dynamic-cache match.
+    for m in candidate_mods:
+        for cname in dir(m):
+            if cname.startswith("_"):
+                continue
+            cls = getattr(m, cname, None)
+            if not isinstance(cls, type):
+                continue
+            if "Cache" in cname:
+                seen_caches.append((m.__name__.rsplit(".", 1)[-1], cname))
+            if cname.endswith("HybridDynamicCache"):
+                return cls
+    # Priority 2: any *Hybrid*Cache class.
+    for m in candidate_mods:
+        for cname in dir(m):
+            if cname.startswith("_") or "Cache" not in cname or "Hybrid" not in cname:
+                continue
+            cls = getattr(m, cname, None)
+            if isinstance(cls, type):
+                return cls
+    if seen_caches:
+        print(f"[hybrid-cache] no *HybridDynamicCache match; saw cache classes {seen_caches}")
+    else:
+        print(f"[hybrid-cache] no Cache classes found across "
+              f"{[m.__name__ for m in candidate_mods]}")
     return None
 
 
