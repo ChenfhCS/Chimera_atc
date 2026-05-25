@@ -1,10 +1,18 @@
-torch>=2.1
-transformers>=4.45
+# Upper bounds matter:
+#   - transformers >=4.50 imports torch.distributed.tensor.device_mesh which
+#     only exists in torch >=2.5; pinning to <4.50 keeps torch 2.4.1
+#     (the version with the most prebuilt mamba_ssm / causal-conv1d wheels)
+#     usable.
+#   - datasets >=4.0 dropped support for script-based loaders (PIQA, MultiNews)
+#     and started rejecting unqualified repo ids like "ai2_arc".
+torch>=2.1,<2.5
+transformers>=4.46,<4.50
 datasets>=2.18,<4.0
-accelerate>=0.28
+accelerate>=0.28,<1.2
+huggingface_hub>=0.23,<0.27
 pyyaml>=6.0
 pandas>=2.0
-numpy>=1.24
+numpy>=1.24,<2.0
 sentencepiece>=0.1.99
 protobuf>=4.25
 rouge-score>=0.1.2
