@@ -39,6 +39,9 @@ def main():
                     help='Seed for representative sampling. Set to 0 to take head-N rows.')
     ap.add_argument('--stratify', default='length', choices=['length', 'random', 'none'])
     ap.add_argument('--input_max_tokens', type=int, default=4096)
+    ap.add_argument('--no_chat_template', action='store_true',
+                    help='Skip tokenizer.apply_chat_template. Default is to apply it when '
+                         'the tokenizer ships one (instruct/chat models).')
     ap.add_argument('--split', default='validation',
                     help='HF split or slice e.g. "validation[:500]" to limit download volume.')
     ap.add_argument('--seed', type=int, default=42)
@@ -60,6 +63,7 @@ def main():
             batch_size=args.batch_size,
             is_dynamic=True,
             input_max_tokens=args.input_max_tokens,
+            apply_chat_template=not args.no_chat_template,
         )
         row = {'model': 'Dynamic Hybrid', **res}
         print(row)

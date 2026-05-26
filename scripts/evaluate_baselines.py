@@ -55,6 +55,12 @@ def main():
                     help='Sampling strategy when sample_seed is set. "length" (default) '
                          'buckets by prompt length and draws evenly across buckets so the '
                          'subset matches the full distribution. Use "random" for plain uniform.')
+    ap.add_argument('--no_chat_template', action='store_true',
+                    help='Skip tokenizer.apply_chat_template even when the tokenizer ships '
+                         'one. By default we apply the chat template so instruct/chat '
+                         'models (Nemotron-H-Instruct, Llama-Instruct) receive their '
+                         'expected role tags. Base models do not have a chat template, so '
+                         'this flag is a no-op for them.')
     ap.add_argument('--input_max_tokens', type=int, default=4096,
                     help='Tokenizer truncation length for input prompts. Lower this to '
                          'speed up long-document evals (arXiv/GovReport prefill is dominated '
@@ -111,6 +117,7 @@ def main():
                     max_new_tokens=args.max_new_tokens,
                     batch_size=args.batch_size,
                     input_max_tokens=args.input_max_tokens,
+                    apply_chat_template=not args.no_chat_template,
                 )
             except Exception as e:
                 print(f'  [{ds_name}] eval failed: {e}')

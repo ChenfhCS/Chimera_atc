@@ -399,6 +399,32 @@ def _build_legacy_hybrid_cache(model, batch_size: int, max_len: int) -> Optional
     return None
 
 
+def _maybe_apply_chat_template(tokenizer, prompt: str, apply: bool) -> str:
+    """Wrap ``prompt`` in the tokenizer's chat template when ``apply`` is True
+    and the tokenizer has one. Instruct/chat models (Nemotron-H-Instruct,
+    Llama-3.2-Instruct, Jamba-Instruct, ...) ship a template; base models
+    don't, so this is a no-op for the base baselines.
+
+    Without this, instruct models score normally on letter-answer tasks
+    (ARC/PIQA/TruthfulQA) but collapse on free-form generation (CNN/DM,
+    PubMed) because the model expects ``<|assistant|>``-style turn tags
+    around its output and emits noise when fed a raw "Summarize: ..." prompt.
+    """
+    if not apply:
+        return prompt
+    chat_template = getattr(tokenizer, "chat_template", None)
+    if not chat_template:
+        return prompt
+    try:
+        return tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    except Exception:
+        return prompt
+
+
 def resolve_max_new_tokens(dataset_name: str, override: Optional[int]) -> int:
     """Pick a generation budget. Explicit override wins; otherwise fall back
     to the per-dataset default so summarization isn't capped at 32 tokens."""
@@ -409,7 +435,7 @@ def resolve_max_new_tokens(dataset_name: str, override: Optional[int]) -> int:
 
 @torch.no_grad()
 def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batch_size=1, is_dynamic=False,
-                   input_max_tokens: int = 4096):
+                   input_max_tokens: int = 4096, apply_chat_template: bool = True):
     preds = []
     total_new = 0
     total_time = 0.0
@@ -417,6 +443,10 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
     hybrid_kwargs = _hybrid_cache_kwargs(model) if not is_dynamic else {}
     cache_announced = False
     use_manual_loop = (not is_dynamic) and _is_nemotron_h(model)
+    # Pre-format prompts once. For base models tokenizer.chat_template is None,
+    # so this is a no-op and we keep the raw "Summarize: ..." prompt.
+    if apply_chat_template:
+        prompts = [_maybe_apply_chat_template(tokenizer, p, True) for p in prompts]
     for i in range(0, len(prompts), batch_size):
         batch = prompts[i:i+batch_size]
         enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=input_max_tokens).to(device)
@@ -479,11 +509,13 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
 
 
 def evaluate_examples(model, tokenizer, examples: List[EvalExample], max_new_tokens=None, batch_size=1,
-                      metric="auto", is_dynamic=False, input_max_tokens: int = 4096) -> Dict:
+                      metric="auto", is_dynamic=False, input_max_tokens: int = 4096,
+                      apply_chat_template: bool = True) -> Dict:
     ds_name = examples[0].dataset if examples else "unknown"
     effective_new_tokens = resolve_max_new_tokens(ds_name, max_new_tokens)
     preds, tps = generate_texts(model, tokenizer, [x.prompt for x in examples], effective_new_tokens,
-                                batch_size, is_dynamic, input_max_tokens=input_max_tokens)
+                                batch_size, is_dynamic, input_max_tokens=input_max_tokens,
+                                apply_chat_template=apply_chat_template)
     labels = [x.target for x in examples]
     ds = ds_name
     if metric == "auto":
