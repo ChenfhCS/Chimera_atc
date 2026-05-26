@@ -270,6 +270,12 @@ def _manual_greedy_with_cache(
     fields = [f for f in _CACHE_OUTPUT_FIELDS if getattr(out, f, None) is not None]
     print(f"[hybrid-cache] output cache fields={fields or 'NONE (in-place)'}")
     cache = _extract_returned_cache(out, fallback=cache)
+    # Mark the cache as warm so subsequent decode calls hit the Mamba "use
+    # stored state" branch instead of treating every step as a fresh prefill.
+    # NemotronH stores this flag on the cache but does not always set it
+    # automatically when prefill runs through a user-supplied cache.
+    if hasattr(cache, "has_previous_state"):
+        cache.has_previous_state = True
     next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     generated = [next_token]
     cur_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
