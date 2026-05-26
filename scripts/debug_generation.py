@@ -70,13 +70,15 @@ def main():
     print(f"input tokens: {input_len}")
 
     if _is_nemotron_h(model):
-        cache = _build_legacy_hybrid_cache(
-            model, batch_size=1, max_len=input_len + args.max_new_tokens,
-        )
-        out_ids = _manual_greedy_with_cache(
-            model, enc.input_ids, enc.attention_mask,
-            max_new_tokens=args.max_new_tokens,
-            eos_token_id=tok.eos_token_id, cache=cache,
+        # Match the production eval path: Nemotron-H's released custom
+        # modeling does not implement an incremental decode (every forward
+        # call re-prefills via mamba_chunk_scan_combined with cache_init=
+        # True), so manual cache loops produce gibberish. The only path that
+        # yields correct text is HF generate with use_cache=False.
+        print("[hybrid-cache] use_cache=False fallback")
+        out_ids = model.generate(
+            **enc, max_new_tokens=args.max_new_tokens, do_sample=False,
+            pad_token_id=tok.eos_token_id, use_cache=False,
         )
     else:
         out_ids = model.generate(
