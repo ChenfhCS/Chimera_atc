@@ -1,4 +1,11 @@
-from chimera.metrics import exact_choice_accuracy, f1_score, mean_f1, rouge_l, mean_rouge_l
+from chimera.metrics import (
+    exact_choice_accuracy,
+    extract_choice_letter,
+    f1_score,
+    mean_f1,
+    mean_rouge_l,
+    rouge_l,
+)
 
 
 def test_choice_accuracy_basic():
@@ -8,6 +15,43 @@ def test_choice_accuracy_basic():
 
 def test_choice_accuracy_wrong():
     assert exact_choice_accuracy(["C", "A"], ["A", "B"]) == 0.0
+
+
+def test_extract_letter_bare():
+    assert extract_choice_letter("A") == "A"
+    assert extract_choice_letter("  B  ") == "B"
+    assert extract_choice_letter("C.") == "C"
+    assert extract_choice_letter("D)") == "D"
+
+
+def test_extract_letter_instruct_preamble():
+    # The output formats we see from Llama-3 / Nemotron-H / Jamba instruct.
+    assert extract_choice_letter("The answer is A.") == "A"
+    assert extract_choice_letter("The answer is **B)**") == "B"
+    assert extract_choice_letter("Of course! The correct answer is C.") == "C"
+    assert extract_choice_letter("Answer: D") == "D"
+    assert extract_choice_letter("\n\nA) lava\n") == "A"
+    assert extract_choice_letter("(B)") == "B"
+    assert extract_choice_letter("Option B is correct because...") == "B"
+    assert extract_choice_letter("I think the answer is **A)**.") == "A"
+
+
+def test_extract_letter_no_match():
+    assert extract_choice_letter("") == ""
+    assert extract_choice_letter("\n\n123") == ""
+    # No A-D letter present (5-choice questions cut off here)
+    assert extract_choice_letter("ZZZ") == ""
+
+
+def test_choice_accuracy_instruct_outputs():
+    preds = [
+        "The answer is A.",
+        "**B)**",
+        "I'd say (C).",
+        "Of course! The answer is D.",
+    ]
+    labels = ["A", "B", "C", "D"]
+    assert exact_choice_accuracy(preds, labels) == 100.0
 
 
 def test_f1_score_identical():

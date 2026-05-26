@@ -12,13 +12,51 @@ def normalize_answer(s: str) -> str:
     return " ".join(s.split())
 
 
+# Patterns used by extract_choice_letter, tried in order.
+# Capture group 1 must be the letter.
+_LETTER_PATTERNS = [
+    r"\banswer\s*(?:is|:)\s*[\*\(\[\{]*\s*([A-Z])\b",   # "the answer is A", "Answer: B"
+    r"\b(?:option|choice)\s*[\*\(\[\{]*\s*([A-Z])\b",   # "option A", "choice (B)"
+    r"^\s*[\*\(\[\{]*\s*([A-Z])\s*[\)\]\}\.\:\,\*]",    # leading "A.", "A)", "**B**"
+    r"^\s*[\*\(\[\{]*\s*([A-Z])\s*$",                    # whole output is just "A"
+    r"\b([A-Z])\)",                                      # "A)" anywhere
+    r"\(([A-Z])\)",                                      # "(A)" anywhere
+    r"\b([A-Z])\b",                                      # first standalone uppercase letter
+]
+
+
+def extract_choice_letter(text: str, valid_letters: str = "ABCDEFGH") -> str:
+    """Extract the model's chosen letter from a free-form prediction.
+
+    Handles both bare outputs ("A") and instruct-style outputs
+    ("The answer is **A)**", "Option A is correct", "(A) lava").
+    Returns "" if no letter in ``valid_letters`` can be found.
+    """
+    if not text:
+        return ""
+    text_upper = text.strip().upper()
+    valid = set(valid_letters)
+    for pattern in _LETTER_PATTERNS:
+        for m in re.finditer(pattern, text_upper):
+            letter = m.group(1)
+            if letter in valid:
+                return letter
+    return ""
+
+
 def exact_choice_accuracy(preds: List[str], labels: List[str]) -> float:
+    """Accuracy for letter-answer tasks (ARC, PIQA, TruthfulQA).
+
+    Robust to instruct/chat outputs that surround the letter with preamble
+    text ("The answer is **A**"), markdown, or parentheses. Falls back to
+    "no letter found" -> wrong.
+    """
     ok = 0
     for p, y in zip(preds, labels):
-        p = p.strip().upper()
-        # Accept either first label character or literal answer text label.
-        pred = p[0] if p else ""
-        ok += int(pred == y.strip().upper()[0])
+        gold = y.strip().upper()
+        gold_letter = gold[0] if gold else ""
+        pred_letter = extract_choice_letter(p)
+        ok += int(pred_letter == gold_letter and pred_letter != "")
     return 100.0 * ok / max(1, len(labels))
 
 
