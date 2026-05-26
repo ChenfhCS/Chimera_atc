@@ -448,7 +448,14 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
     device = next(model.parameters()).device
     hybrid_kwargs = _hybrid_cache_kwargs(model) if not is_dynamic else {}
     cache_announced = False
-    use_manual_loop = (not is_dynamic) and _is_nemotron_h(model)
+    # Manual cache path for Nemotron-H is currently disabled. The modeling
+    # code's cuda_kernels_forward effectively re-prefills on every call
+    # (update_conv_state(..., cache_init=True) overwrites the stored state
+    # each step). Running with use_cache=False on this model gives correct
+    # output at the cost of slower per-token throughput; running with the
+    # manual cache loop produced gibberish output (token 1518 looping).
+    use_manual_loop = False
+    is_nemotron_h_no_cache = (not is_dynamic) and _is_nemotron_h(model)
     # Pre-format prompts once. For base models tokenizer.chat_template is None,
     # so this is a no-op and we keep the raw "Summarize: ..." prompt.
     if apply_chat_template:
@@ -496,7 +503,20 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
                     pad_token_id=tokenizer.eos_token_id,
                     use_cache=True,
                 )
-                gen_kwargs.update(hybrid_kwargs)
+                if is_nemotron_h_no_cache:
+                    # See use_manual_loop comment: Nemotron-H's modeling code
+                    # re-prefills every step regardless of cache, and the
+                    # cache_implementation kwarg gets silently ignored. The
+                    # only correct path on this checkpoint today is to skip
+                    # cache entirely and let .generate() re-run prefill each
+                    # step. Reports lower throughput but correct ROUGE.
+                    gen_kwargs["use_cache"] = False
+                    if not cache_announced:
+                        print(f"[hybrid-cache] {model.__class__.__name__}: "
+                              f"use_cache=False fallback (correct but slow)")
+                        cache_announced = True
+                else:
+                    gen_kwargs.update(hybrid_kwargs)
                 try:
                     out = model.generate(**enc, **gen_kwargs)
                 except (TypeError, ValueError) as e:
