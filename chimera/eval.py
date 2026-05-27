@@ -411,10 +411,13 @@ def _maybe_apply_chat_template(tokenizer, prompt: str, apply: bool) -> str:
     Llama-3.2-Instruct, Jamba-Instruct, ...) ship a template; base models
     don't, so this is a no-op for the base baselines.
 
-    Without this, instruct models score normally on letter-answer tasks
-    (ARC/PIQA/TruthfulQA) but collapse on free-form generation (CNN/DM,
-    PubMed) because the model expects ``<|assistant|>``-style turn tags
-    around its output and emits noise when fed a raw "Summarize: ..." prompt.
+    Reasoning models (NVIDIA Nemotron-Nano-V2 family) emit a
+    ``<think>...</think>`` block before the actual answer. With small
+    max_new_tokens budgets the model only emits the start of the thinking
+    trace and never reaches the letter for ARC/PIQA. We detect this by
+    looking for the ``/think`` directive in the chat template itself and
+    prepend a ``/no_think`` system message so the template switches into
+    its direct-answer branch.
     """
     if not apply:
         return prompt
@@ -422,10 +425,12 @@ def _maybe_apply_chat_template(tokenizer, prompt: str, apply: bool) -> str:
     if not chat_template:
         return prompt
     try:
+        messages = []
+        if "/think" in chat_template or "/no_think" in chat_template:
+            messages.append({"role": "system", "content": "/no_think"})
+        messages.append({"role": "user", "content": prompt})
         return tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
+            messages, tokenize=False, add_generation_prompt=True,
         )
     except Exception:
         return prompt
