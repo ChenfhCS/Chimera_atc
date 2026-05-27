@@ -405,19 +405,35 @@ def _build_legacy_hybrid_cache(model, batch_size: int, max_len: int) -> Optional
     return None
 
 
-def _maybe_apply_chat_template(tokenizer, prompt: str, apply: bool) -> str:
+_MC_SYSTEM_DIRECTIVE = (
+    "Respond with only the letter of the correct answer (A, B, C, or D). "
+    "Do not explain or include any other text."
+)
+
+
+def _maybe_apply_chat_template(
+    tokenizer,
+    prompt: str,
+    apply: bool,
+    multi_choice_hint: bool = False,
+) -> str:
     """Wrap ``prompt`` in the tokenizer's chat template when ``apply`` is True
     and the tokenizer has one. Instruct/chat models (Nemotron-H-Instruct,
     Llama-3.2-Instruct, Jamba-Instruct, ...) ship a template; base models
     don't, so this is a no-op for the base baselines.
 
-    Reasoning models (NVIDIA Nemotron-Nano-V2 family) emit a
-    ``<think>...</think>`` block before the actual answer. With small
-    max_new_tokens budgets the model only emits the start of the thinking
-    trace and never reaches the letter for ARC/PIQA. We detect this by
-    looking for the ``/think`` directive in the chat template itself and
-    prepend a ``/no_think`` system message so the template switches into
-    its direct-answer branch.
+    Two extra knobs:
+      * ``/no_think`` is prepended for reasoning models (Nemotron-Nano-V2)
+        so they don't waste the token budget on a thinking trace.
+      * On multi-choice tasks (``multi_choice_hint=True``) we also tell
+        chat models to emit only the letter, otherwise they preamble with
+        "The most recently developed technology among the options is
+        cellular telephone" and the regex extractor never finds A/B/C/D —
+        or worse, picks up an incidental "(B)" from explanation text.
+
+    Base models are untouched: ``chat_template`` is None so the function
+    returns the raw prompt and the previously-published baseline numbers
+    are not perturbed by these directives.
     """
     if not apply:
         return prompt
@@ -425,9 +441,14 @@ def _maybe_apply_chat_template(tokenizer, prompt: str, apply: bool) -> str:
     if not chat_template:
         return prompt
     try:
-        messages = []
+        system_parts = []
         if "/think" in chat_template or "/no_think" in chat_template:
-            messages.append({"role": "system", "content": "/no_think"})
+            system_parts.append("/no_think")
+        if multi_choice_hint:
+            system_parts.append(_MC_SYSTEM_DIRECTIVE)
+        messages = []
+        if system_parts:
+            messages.append({"role": "system", "content": "\n".join(system_parts)})
         messages.append({"role": "user", "content": prompt})
         return tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
@@ -457,7 +478,8 @@ def _is_reasoning_model(tokenizer) -> bool:
 
 @torch.no_grad()
 def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batch_size=1, is_dynamic=False,
-                   input_max_tokens: int = 4096, apply_chat_template: bool = True):
+                   input_max_tokens: int = 4096, apply_chat_template: bool = True,
+                   multi_choice_hint: bool = False):
     preds = []
     total_new = 0
     total_time = 0.0
@@ -475,7 +497,10 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
     # Pre-format prompts once. For base models tokenizer.chat_template is None,
     # so this is a no-op and we keep the raw "Summarize: ..." prompt.
     if apply_chat_template:
-        prompts = [_maybe_apply_chat_template(tokenizer, p, True) for p in prompts]
+        prompts = [
+            _maybe_apply_chat_template(tokenizer, p, True, multi_choice_hint=multi_choice_hint)
+            for p in prompts
+        ]
     for i in range(0, len(prompts), batch_size):
         batch = prompts[i:i+batch_size]
         enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=input_max_tokens).to(device)
@@ -555,19 +580,21 @@ def evaluate_examples(model, tokenizer, examples: List[EvalExample], max_new_tok
                       apply_chat_template: bool = True) -> Dict:
     ds_name = examples[0].dataset if examples else "unknown"
     effective_new_tokens = resolve_max_new_tokens(ds_name, max_new_tokens)
+    is_multi_choice = ds_name in {"ARC-e", "ARC-c", "PIQA", "TruthfulQA"}
     # Reasoning instruct models still preamble the letter on multi-choice
     # tasks ("The most recent technology among the options is A"). 8 tokens
     # is enough for "The answer is A" but not for verbose preambles, so
     # extend the budget to 32 specifically for these models on letter tasks.
     if (
-        ds_name in {"ARC-e", "ARC-c", "PIQA", "TruthfulQA"}
+        is_multi_choice
         and max_new_tokens is None
         and _is_reasoning_model(tokenizer)
     ):
         effective_new_tokens = max(effective_new_tokens, 32)
     preds, tps = generate_texts(model, tokenizer, [x.prompt for x in examples], effective_new_tokens,
                                 batch_size, is_dynamic, input_max_tokens=input_max_tokens,
-                                apply_chat_template=apply_chat_template)
+                                apply_chat_template=apply_chat_template,
+                                multi_choice_hint=is_multi_choice)
     labels = [x.target for x in examples]
     ds = ds_name
     if metric == "auto":
