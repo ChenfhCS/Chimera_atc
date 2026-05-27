@@ -50,7 +50,13 @@ def main():
     ex = examples[args.sample_idx]
 
     raw_prompt = ex.prompt
-    formatted = _maybe_apply_chat_template(tok, raw_prompt, apply=not args.no_chat_template)
+    # Mirror the production eval path: multi-choice datasets emit a system
+    # directive on chat models telling them to output only the letter.
+    is_mc = ex.dataset in {"ARC-e", "ARC-c", "PIQA", "TruthfulQA"}
+    formatted = _maybe_apply_chat_template(
+        tok, raw_prompt, apply=not args.no_chat_template,
+        multi_choice_hint=is_mc,
+    )
 
     print("=" * 80)
     print(f"chat_template present: {bool(tok.chat_template)}")
