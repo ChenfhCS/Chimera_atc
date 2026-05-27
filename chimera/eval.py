@@ -444,6 +444,17 @@ def resolve_max_new_tokens(dataset_name: str, override: Optional[int]) -> int:
     return DATASET_DEFAULT_MAX_NEW_TOKENS.get(dataset_name, 32)
 
 
+def _is_reasoning_model(tokenizer) -> bool:
+    """Detect reasoning models (NVIDIA Nemotron-Nano-V2 family) by looking
+    for the /think directive in their chat template. We use it to bump up
+    max_new_tokens on letter-answer tasks: even with /no_think the model
+    still prefixes a short preamble ("The most recently developed
+    technology is...") that pushes the actual letter past an 8-token budget.
+    """
+    ct = getattr(tokenizer, "chat_template", None) or ""
+    return "/think" in ct or "/no_think" in ct
+
+
 @torch.no_grad()
 def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batch_size=1, is_dynamic=False,
                    input_max_tokens: int = 4096, apply_chat_template: bool = True):
@@ -544,6 +555,16 @@ def evaluate_examples(model, tokenizer, examples: List[EvalExample], max_new_tok
                       apply_chat_template: bool = True) -> Dict:
     ds_name = examples[0].dataset if examples else "unknown"
     effective_new_tokens = resolve_max_new_tokens(ds_name, max_new_tokens)
+    # Reasoning instruct models still preamble the letter on multi-choice
+    # tasks ("The most recent technology among the options is A"). 8 tokens
+    # is enough for "The answer is A" but not for verbose preambles, so
+    # extend the budget to 32 specifically for these models on letter tasks.
+    if (
+        ds_name in {"ARC-e", "ARC-c", "PIQA", "TruthfulQA"}
+        and max_new_tokens is None
+        and _is_reasoning_model(tokenizer)
+    ):
+        effective_new_tokens = max(effective_new_tokens, 32)
     preds, tps = generate_texts(model, tokenizer, [x.prompt for x in examples], effective_new_tokens,
                                 batch_size, is_dynamic, input_max_tokens=input_max_tokens,
                                 apply_chat_template=apply_chat_template)
