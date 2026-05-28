@@ -37,6 +37,16 @@ def _fmt_b(n):
     return f"{n / 1e9:.2f}B"
 
 
+def _hidden_size(cfg) -> int:
+    """Pull the model's hidden / d_model / n_embd dimension. Returns -1 if
+    none of the well-known config keys are present."""
+    for key in ("hidden_size", "d_model", "n_embd"):
+        v = getattr(cfg, key, None)
+        if v is not None:
+            return int(v)
+    return -1
+
+
 def _count_layer_types(cfg, arch_name: str):
     """Return (n_attn, n_ssm). -1 means unknown for that architecture."""
     name = (arch_name or "").lower()
@@ -111,6 +121,7 @@ def _compute_params(model, cfg, arch_name: str):
 def analyze(name: str, path: str):
     cfg = AutoConfig.from_pretrained(path, trust_remote_code=True)
     arch = cfg.__class__.__name__
+    hidden = _hidden_size(cfg)
     n_attn, n_ssm = _count_layer_types(cfg, arch)
 
     total = active = None
@@ -129,6 +140,7 @@ def analyze(name: str, path: str):
         "model": name,
         "path": path,
         "arch": arch,
+        "hidden": hidden,
         "total_params": total,
         "active_params": active,
         "n_attn": n_attn,
@@ -158,6 +170,7 @@ def main():
             print(f"  FAILED: {type(e).__name__}: {e}", file=sys.stderr)
             rows.append({
                 "model": m["name"], "path": m["path"], "arch": "?",
+                "hidden": -1,
                 "total_params": None, "active_params": None,
                 "n_attn": -1, "n_ssm": -1,
             })
@@ -168,23 +181,27 @@ def main():
     md_path = args.output + ".md"
 
     with open(csv_path, "w", encoding="utf-8") as f:
-        f.write("model,arch,Param.,Act. Param.,N_attn,N_ssm\n")
+        f.write("model,arch,hidden,Param.,Act. Param.,N_attn,N_ssm\n")
         for r in rows:
             total_s = _fmt_b(r["total_params"])
             active_s = _fmt_b(r["active_params"])
+            hd = "?" if r["hidden"] in (None, -1) else str(r["hidden"])
             na = "-" if r["n_attn"] in (0, -1) else str(r["n_attn"])
             ns = "-" if r["n_ssm"] in (0, -1) else str(r["n_ssm"])
-            f.write(f'{r["model"]},{r["arch"]},{total_s},{active_s},{na},{ns}\n')
+            f.write(f'{r["model"]},{r["arch"]},{hd},{total_s},{active_s},{na},{ns}\n')
 
     # Markdown: mimic the paper layout.
-    md = ["| model | arch | Param. | Act. Param. | $N_\\text{attn}$ | $N_\\text{ssm}$ |",
-          "|:---|:---|:---:|:---:|:---:|:---:|"]
+    md = [
+        "| model | arch | hidden | Param. | Act. Param. | $N_\\text{attn}$ | $N_\\text{ssm}$ |",
+        "|:---|:---|:---:|:---:|:---:|:---:|:---:|",
+    ]
     for r in rows:
         total_s = _fmt_b(r["total_params"])
         active_s = _fmt_b(r["active_params"])
+        hd = "?" if r["hidden"] in (None, -1) else str(r["hidden"])
         na = "-" if r["n_attn"] in (0, -1) else str(r["n_attn"])
         ns = "-" if r["n_ssm"] in (0, -1) else str(r["n_ssm"])
-        md.append(f'| {r["model"]} | {r["arch"]} | {total_s} | {active_s} | {na} | {ns} |')
+        md.append(f'| {r["model"]} | {r["arch"]} | {hd} | {total_s} | {active_s} | {na} | {ns} |')
     with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(md) + "\n")
 
