@@ -575,18 +575,6 @@ def generate_texts(model, tokenizer, prompts: List[str], max_new_tokens=32, batc
     return preds, tps
 
 
-def _count_parameters(model) -> int:
-    """Sum of element counts across all parameters. Used as a coarse
-    proxy for forward-pass FLOPS/token (2 * N for autoregressive
-    transformers; same constant works as a comparative baseline for
-    SSM/hybrid models even if the true ratio differs slightly).
-    """
-    try:
-        return int(sum(p.numel() for p in model.parameters()))
-    except Exception:
-        return 0
-
-
 def evaluate_examples(model, tokenizer, examples: List[EvalExample], max_new_tokens=None, batch_size=1,
                       metric="auto", is_dynamic=False, input_max_tokens: int = 4096,
                       apply_chat_template: bool = True) -> Dict:
@@ -626,11 +614,6 @@ def evaluate_examples(model, tokenizer, examples: List[EvalExample], max_new_tok
     else:
         score = mean_rouge_l(preds, labels)
         key = "ROUGE-L"
-    n_params = _count_parameters(model)
-    # Standard autoregressive forward-pass approximation: 2 FLOPs per parameter
-    # per generated token (one multiply + one add). Reported as a float so JSON
-    # readers see e.g. 6.0e9, and formatted for human display as ``6.00e+09``.
-    flops_per_token = float(2 * n_params)
     return {
         "dataset": ds,
         "metric": key,
@@ -639,7 +622,4 @@ def evaluate_examples(model, tokenizer, examples: List[EvalExample], max_new_tok
         "num_samples": len(examples),
         "max_new_tokens": effective_new_tokens,
         "input_max_tokens": input_max_tokens,
-        "params": n_params,
-        "flops_per_token": flops_per_token,
-        "flops_per_token_fmt": f"{flops_per_token:.2e}",
     }

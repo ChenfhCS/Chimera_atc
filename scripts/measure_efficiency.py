@@ -243,9 +243,9 @@ def main():
             score = scores.get((r["model"], d), {}).get("score")
             if score is not None:
                 spt = score / d_tflops
-                cells += [f"{d_tflops:.3f}", f"{score:.2f}", f"{spt:.1f}"]
+                cells += [f"{d_tflops:.2e}", f"{score:.2f}", f"{spt:.2e}"]
             else:
-                cells += [f"{d_tflops:.3f}", "-", "-"]
+                cells += [f"{d_tflops:.2e}", "-", "-"]
         md_lines.append("| " + " | ".join(cells) + " |")
         csv_lines.append(",".join(cells))
 

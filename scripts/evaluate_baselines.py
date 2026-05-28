@@ -125,17 +125,7 @@ def main():
                 append_jsonl(args.output, {'model': name, 'dataset': ds_name, 'error': repr(e)})
                 continue
             row = {'model': name, **res}
-            # Pretty console print: keep raw values in JSONL, but show
-            # FLOPS/token in 2-decimal scientific notation on stdout.
-            pretty = dict(row)
-            if 'flops_per_token' in pretty:
-                pretty['flops_per_token'] = f"{pretty['flops_per_token']:.2e}"
-                pretty.pop('flops_per_token_fmt', None)
-            if 'score' in pretty:
-                pretty['score'] = f"{pretty['score']:.2f}"
-            if 'tpt' in pretty:
-                pretty['tpt'] = f"{pretty['tpt']:.2f}"
-            print('  ', pretty)
+            print('  ', row)
             append_jsonl(args.output, row)
 
         if args.free_after:
