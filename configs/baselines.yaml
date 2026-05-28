@@ -3,13 +3,14 @@
 # Notes:
 #   * Models marked "auth: gated" require `huggingface-cli login` with a token
 #     that has been granted access on the model card.
-#   * `state-spaces/mamba2-2.7b` is NOT a HuggingFace AutoModelForCausalLM
-#     checkpoint (it ships as `mamba_ssm.MambaLMHeadModel`). We substitute the
-#     HuggingFace-native `state-spaces/mamba2-hybrid-2.7b-300b` here; if you
-#     really need the original 2.7B Mamba-2, see
-#     `docs/baselines.md` for the mamba_ssm wrapper path.
-#   * Jamba and Nemotron-H need transformers>=4.46 and `trust_remote_code=true`.
-#   * Names below are used verbatim with `--models`.
+#   * Zamba2 / Jamba / Nemotron-H / Falcon-Mamba require mamba_ssm + causal-conv1d
+#     to run with hardware-accelerated kernels (otherwise HF will fall back to
+#     a much slower pure-PyTorch implementation and the throughput numbers are
+#     not meaningful). Install per docs/baselines.md.
+#   * All non-Llama models below need `trust_remote_code=true` (already set as
+#     the global default) and transformers >=4.46.
+#   * The `name` field is what `--models` matches against.
+#   * Default tier dtype is bfloat16; override `torch_dtype:` per-row if needed.
 
 torch_dtype: bfloat16
 device_map: auto
@@ -22,29 +23,47 @@ datasets:
   - piqa
   - truthfulqa
   - cnn/dm
-  - govreport
+  - pubmed
 
 models:
   # ---------- Small tier (≤4.5B) ----------
   - name: Llama-3-3.2B
     path: meta-llama/Llama-3.2-3B
-    # auth: gated
-  - name: Mamba-2-2.7B
-    # Replace with state-spaces/mamba2-2.7b only if you wire up the mamba_ssm
-    # loader described in docs/baselines.md.
-    path: state-spaces/mamba-2.8b-hf
+    # auth: gated -- agree to license at https://huggingface.co/meta-llama/Llama-3.2-3B
+
+  - name: Zamba2-2.7B
+    # Hybrid Mamba2+Attention from Zyphra. Upstream support landed in
+    # transformers 4.45+. Needs mamba_ssm for fast kernels.
+    path: Zyphra/Zamba2-2.7B-Instruct
+
   - name: Jamba-3.2B
-    path: ai21labs/AI21-Jamba2-3B          # confirm this repo exists on HF
+    # AI21 Jamba2 (hybrid Mamba+Attention). Confirm this repo exists on HF
+    # Hub; some Jamba2 variants are gated.
+    path: ai21labs/AI21-Jamba2-3B
+
   - name: Nemotron-H-4.5B
+    # NVIDIA Nemotron-H Instruct (Mamba+Attention hybrid). Ships custom
+    # modeling code that *hard-imports* mamba_ssm at load time.
     path: nvidia/Nemotron-H-4B-Instruct-128K
     torch_dtype: bfloat16
 
-  # ---------- Large tier (≥8B) ----------
+  # ---------- Large tier (≥7B) ----------
   - name: Llama-3-13B
+    # Community fine-tune (Llama-3 base + Instruct merge).
     path: elinas/Llama-3-13B-Instruct
-  - name: Mamba-2-8.2B
-    path: nvidia/mamba2-8b-3t-4k
-  - name: Jamba-13B
-    path: OxxoCodes/jamba-small-v1
+
+  - name: Zamba2-7B
+    # Same family as Zamba2-2.7B, just larger. ~14 GB at bf16.
+    path: Zyphra/Zamba2-7B-Instruct
+
   - name: Nemotron-H-12B
+    # NVIDIA Nemotron-Nano-12B-v2 is a reasoning Nemotron-H. The eval code
+    # auto-detects the /think directive and bumps max_new_tokens on
+    # multi-choice tasks so the actual letter survives the preamble.
     path: nvidia/NVIDIA-Nemotron-Nano-12B-v2
+
+  - name: Falcon-Mamba-7B
+    # TII pure-Mamba 7B Instruct. No attention layers; needs mamba_ssm and
+    # causal-conv1d for both correctness AND throughput on GPU.
+    path: tiiuae/falcon-mamba-7b-instruct
+    torch_dtype: bfloat16
