@@ -2,10 +2,12 @@
 """Aggregate one or more *.jsonl result files into a flat CSV (+ markdown).
 
 Output schema:
-    model, score_<dataset>, ..., tpt_<dataset>, ...
+    model, score_<dataset>, ..., tpt_<dataset>, ..., flops_per_token_<dataset>, ...
 
-Numbers are rounded to 2 decimals. Rows missing a (model, dataset) cell are
-written as empty.
+* ``score`` and ``tpt`` are rounded to ``--decimals`` (default 2).
+* ``flops_per_token`` is always rendered in 2-decimal scientific notation
+  (e.g. ``6.00e+09``) since the raw integers are unwieldy.
+Rows missing a (model, dataset) cell are written as empty.
 """
 from __future__ import annotations
 
@@ -17,6 +19,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
+
+
+# Field-specific column ordering and formatter. Add to FLOAT_METRICS for
+# decimal-rounded fields; add to SCI_METRICS for scientific-notation fields.
+FLOAT_METRICS = ("score", "tpt")
+SCI_METRICS = ("flops_per_token",)
+ALL_METRICS = FLOAT_METRICS + SCI_METRICS
 
 
 def _load_rows(paths):
@@ -45,6 +54,13 @@ def _drop_errors(rows):
     return keep
 
 
+def _format_sci(v, decimals: int = 2) -> str:
+    """Render a float in NN.MMe+EE notation. Empty cell stays empty."""
+    if v is None or pd.isna(v):
+        return ""
+    return f"{float(v):.{decimals}e}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--inputs", nargs="+", required=True)
@@ -52,6 +68,9 @@ def main():
     ap.add_argument("--output_md", default=None,
                     help="Optional markdown twin of the CSV. Default: <csv>.md")
     ap.add_argument("--decimals", type=int, default=2)
+    ap.add_argument("--sci_decimals", type=int, default=2,
+                    help="Decimal places inside the scientific-notation cells "
+                         "(default 2 → e.g. 6.00e+09).")
     args = ap.parse_args()
 
     rows = _drop_errors(_load_rows(args.inputs))
@@ -59,33 +78,55 @@ def main():
         print("no valid result rows found")
         sys.exit(1)
     df = pd.DataFrame(rows)
-    # Pivot to wide form, then flatten the MultiIndex to single-row headers.
+
+    # Decide which metrics actually appear in the data so we don't reference
+    # missing columns (e.g. old jsonl that pre-dates flops_per_token).
+    present_metrics = [m for m in ALL_METRICS if m in df.columns]
+    if not present_metrics:
+        print("input rows have no recognized metric columns (score/tpt/flops_per_token)")
+        sys.exit(1)
+
     pivot = df.pivot_table(
-        index="model", columns="dataset", values=["score", "tpt"], aggfunc="mean",
+        index="model", columns="dataset", values=present_metrics, aggfunc="mean",
     )
     pivot.columns = [f"{metric}_{ds}" for metric, ds in pivot.columns]
-    # Order columns so all score_* come first, then tpt_*, datasets alphabetical.
-    datasets = sorted({c.split("_", 1)[1] for c in pivot.columns})
-    ordered = [f"score_{d}" for d in datasets if f"score_{d}" in pivot.columns]
-    ordered += [f"tpt_{d}" for d in datasets if f"tpt_{d}" in pivot.columns]
+
+    # Stable column order: score_* first, then tpt_*, then flops_per_token_*.
+    datasets = sorted({c.split("_", 1)[1] for c in pivot.columns
+                       if c.split("_", 1)[1] in df["dataset"].unique()})
+    ordered = []
+    for metric in present_metrics:
+        for d in datasets:
+            col = f"{metric}_{d}"
+            if col in pivot.columns:
+                ordered.append(col)
     pivot = pivot[ordered].sort_index()
-    pivot = pivot.round(args.decimals)
+
+    # Build a display copy: round score/tpt; format flops_per_token in sci.
+    display = pivot.copy()
+    for col in display.columns:
+        metric = col.split("_", 1)[0]
+        if metric == "flops_per_token":
+            display[col] = display[col].apply(
+                lambda v: _format_sci(v, args.sci_decimals)
+            )
+        else:
+            display[col] = display[col].round(args.decimals)
 
     os.makedirs(os.path.dirname(args.output_csv) or ".", exist_ok=True)
-    pivot.to_csv(args.output_csv)
-    print(f"wrote {args.output_csv} ({pivot.shape[0]} models x {pivot.shape[1]} columns)")
-    # Console preview.
+    display.to_csv(args.output_csv)
+    print(f"wrote {args.output_csv} ({display.shape[0]} models x {display.shape[1]} columns)")
+
     with pd.option_context("display.max_columns", None,
-                           "display.width", 200,
+                           "display.width", 240,
                            "display.float_format", lambda v: f"{v:.{args.decimals}f}"):
-        print(pivot)
+        print(display)
 
     md_path = args.output_md or (args.output_csv.rsplit(".", 1)[0] + ".md")
     try:
-        md = pivot.to_markdown(floatfmt=f".{args.decimals}f")
+        md = display.to_markdown()
     except Exception:
-        # pandas may need tabulate; fall back to a hand-rolled table.
-        md = pivot.reset_index().to_string(index=False)
+        md = display.reset_index().to_string(index=False)
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(md + "\n")
     print(f"wrote {md_path}")

@@ -66,7 +66,15 @@ def main():
             apply_chat_template=not args.no_chat_template,
         )
         row = {'model': 'Dynamic Hybrid', **res}
-        print(row)
+        pretty = dict(row)
+        if 'flops_per_token' in pretty:
+            pretty['flops_per_token'] = f"{pretty['flops_per_token']:.2e}"
+            pretty.pop('flops_per_token_fmt', None)
+        if 'score' in pretty:
+            pretty['score'] = f"{pretty['score']:.2f}"
+        if 'tpt' in pretty:
+            pretty['tpt'] = f"{pretty['tpt']:.2f}"
+        print(pretty)
         append_jsonl(args.output, row)
 
 if __name__ == '__main__':
